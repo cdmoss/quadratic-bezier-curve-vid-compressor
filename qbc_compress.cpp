@@ -1,12 +1,20 @@
-#include <iostream>
 #include <vector>
 #include <opencv2/opencv.hpp>
 #include <omp.h>
 #include <fstream>
+#include <tuple>
 
 double video_fps = 0.0;
 
-std::vector<cv::Mat> extractColorValues(const std::string& videoPath) {
+struct BezierControlPoints {
+    cv::Vec3f startPoint;
+    cv::Vec3f middlePoint;
+    cv::Vec3f endPoint;
+};
+
+std::vector<cv::Mat> readVideoData(const std::string& videoPath) {
+    std::cout << "Reading video data..." << std::endl;
+
     // Initialize the video capture object
     cv::VideoCapture cap(videoPath);
 
@@ -37,207 +45,294 @@ std::vector<cv::Mat> extractColorValues(const std::string& videoPath) {
         frames.push_back(frame.clone());
     }
 
+    std::cout << "Read " << frames.size() << " frames of video data" << std::endl;
+
     return frames;
 }
 
-std::vector<std::pair<int, int>> divideIntoSegments(const std::vector<cv::Mat>& frames, const std::vector<int>& breakpoints) {
-    std::vector<std::pair<int, int>> segments;
-    int start = 0;
+std::size_t calculateUncompressedVideoSizeInBytes(const std::vector<cv::Mat>& frames) {
+    std::size_t totalSizeInBytes = 0;
 
-    for (int breakpoint : breakpoints) {
-        segments.push_back({start, breakpoint});
-        start = breakpoint;
+    for (const auto& frame : frames) {
+        std::size_t frameSizeInBytes = frame.total() * frame.elemSize();
+        totalSizeInBytes += frameSizeInBytes;
     }
-    segments.push_back({start, static_cast<int>(frames.size())});
+
+    return totalSizeInBytes;
+}
+
+std::vector<std::vector<cv::Mat>> splitFramesIntoSegments(const std::vector<cv::Mat>& frames, int numSegments) {
+    std::vector<std::vector<cv::Mat>> segments;
+    int totalFrames = frames.size();
+
+    // Calculate the size of each segment
+    int segmentSize = totalFrames / numSegments;
+
+    for (int i = 0; i < numSegments; ++i) {
+        // Determine the start and end indices for the current segment
+        int startIdx = i * segmentSize;
+        int endIdx = (i == numSegments - 1) ? totalFrames : (i + 1) * segmentSize;
+
+        // Create a vector to hold the frames for the current segment
+        std::vector<cv::Mat> segmentFrames;
+
+        // Add the frames to the current segment
+        for (int j = startIdx; j < endIdx; ++j) {
+            segmentFrames.push_back(frames[j]);
+        }
+
+        // Add the current segment to the list of segments
+        segments.push_back(segmentFrames);
+    }
 
     return segments;
 }
 
-std::vector<cv::Mat> leastSquaresControlPoints(const std::vector<cv::Mat>& frames, int start, int end) {
-    int rows = frames[0].rows;
-    int cols = frames[0].cols;
-    int count = end - start;
+std::vector<std::vector<BezierControlPoints>> calculateBezierControlPoints(const std::vector<cv::Mat>& segment) {
+    int segmentSize = segment.size();
+    int rows = segment[0].rows;
+    int cols = segment[0].cols;
 
-    std::vector<cv::Mat> control_points(3, cv::Mat::zeros(rows, cols, CV_32SC2));
+    std::vector<std::vector<BezierControlPoints>> controlPoints(rows, std::vector<BezierControlPoints>(cols));
 
-    for (int i = start; i < end; i++) {
-        for (int r = 0; r < rows; r++) {
-            for (int c = 0; c < cols; c++) {
-                cv::Vec3b pixel_value = frames[i].at<cv::Vec3b>(r, c);
-                control_points[0].at<cv::Point>(r, c) += cv::Point(i * pixel_value[0], i * pixel_value[1]);
-                control_points[1].at<cv::Point>(r, c) += cv::Point(pixel_value[0], pixel_value[1]);
-                control_points[2].at<cv::Point>(r, c) += cv::Point(i * pixel_value[2], pixel_value[2]);
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            cv::Vec3f startPoint = segment.front().at<cv::Vec3b>(i, j);
+            cv::Vec3f endPoint = segment.back().at<cv::Vec3b>(i, j);
+
+            cv::Vec3f middlePoint(0, 0, 0);
+            cv::Vec3f numerator(0, 0, 0);
+            float denominator = 0;
+
+            for (int frameIdx = 0; frameIdx < segmentSize; ++frameIdx) {
+                float t = static_cast<float>(frameIdx) / (segmentSize - 1);
+                cv::Vec3f v = segment[frameIdx].at<cv::Vec3b>(i, j);
+
+                numerator += (v - (1 - t) * (1 - t) * startPoint - t * t * endPoint) * 2 * t * (1 - t);
+                denominator += 2 * t * (1 - t);
+            }
+
+            middlePoint = numerator / denominator;
+
+            BezierControlPoints points = { startPoint, middlePoint, endPoint };
+            controlPoints[i][j] = points;
+        }
+        // Print progress
+        int progress = static_cast<int>(static_cast<float>(i) / (rows - 1) * 100);
+        std::cout << "\rProgress: " << progress << "%";
+        std::cout.flush();
+    }
+
+    std::cout << std::endl;
+    return controlPoints;
+}
+
+
+std::vector<std::vector<std::vector<BezierControlPoints>>> calculateControlPointsForAllSegments(const std::vector<std::vector<cv::Mat>>& segments) {
+    int numSegments = segments.size();
+    std::vector<std::vector<std::vector<BezierControlPoints>>> allControlPoints(numSegments);
+    std::vector<int> progress(numSegments, 0);
+
+    // Set the number of threads to the number of segments
+    omp_set_num_threads(numSegments);
+
+    // Parallelize the loop that iterates over the segments
+    #pragma omp parallel for
+    for (int segmentIdx = 0; segmentIdx < numSegments; ++segmentIdx) {
+        int numRows = segments[segmentIdx][0].rows;
+        
+        for (int row = 0; row < numRows; ++row) {
+            // Update the progress for the current segment
+            progress[segmentIdx] = static_cast<int>(static_cast<float>(row) / (numRows - 1) * 100);
+        }
+
+        allControlPoints[segmentIdx] = calculateBezierControlPoints(segments[segmentIdx]);
+    }
+
+    // Print the progress of each segment
+    for (int i = 0; i < numSegments; ++i) {
+        std::cout << "Segment " << i + 1 << " progress: " << progress[i] << "%" << std::endl;
+    }
+
+    return allControlPoints;
+}
+
+void writeControlPointsToFile(const std::string& videoPath, const std::vector<std::vector<std::vector<BezierControlPoints>>>& bezierControlPoints) {
+    // Extract the video name and create the output file path
+    std::string videoName = videoPath.substr(0, videoPath.find_last_of('.')) + ".qbc";
+    std::ofstream outFile(videoName, std::ios::binary);
+
+    if (!outFile.is_open()) {
+        std::cerr << "Error: Could not open the output file for writing." << std::endl;
+        return;
+    }
+
+    // Write the number of segments, rows, and columns
+    int numSegments = bezierControlPoints.size();
+    int rows = bezierControlPoints[0].size();
+    int cols = bezierControlPoints[0][0].size();
+    outFile.write(reinterpret_cast<const char*>(&numSegments), sizeof(int));
+    outFile.write(reinterpret_cast<const char*>(&rows), sizeof(int));
+    outFile.write(reinterpret_cast<const char*>(&cols), sizeof(int));
+
+    // Write the control points
+    for (const auto& segment : bezierControlPoints) {
+        for (const auto& row : segment) {
+            for (const auto& point : row) {
+                outFile.write(reinterpret_cast<const char*>(&point.startPoint), sizeof(cv::Vec3f));
+                outFile.write(reinterpret_cast<const char*>(&point.middlePoint), sizeof(cv::Vec3f));
+                outFile.write(reinterpret_cast<const char*>(&point.endPoint), sizeof(cv::Vec3f));
+            }
+        }
+    }
+    std::cout << "Control points saved to: " << videoName << std::endl;
+    std::cout << "Number of bytes written: " << outFile.tellp() << std::endl;
+    outFile.close();
+}
+
+std::vector<std::vector<std::vector<BezierControlPoints>>> readControlPointsFromFile(const std::string& videoPath) {
+    // Extract the video name and create the input file path
+    std::string videoName = videoPath.substr(0, videoPath.find_last_of('.')) + ".qbc";
+    std::ifstream inFile(videoName, std::ios::binary);
+
+    if (!inFile.is_open()) {
+        std::cerr << "Error: Could not open the input file for reading." << std::endl;
+        return {};
+    }
+
+    // Read the number of segments, rows, and columns
+    int numSegments, rows, cols;
+    inFile.read(reinterpret_cast<char*>(&numSegments), sizeof(int));
+    inFile.read(reinterpret_cast<char*>(&rows), sizeof(int));
+    inFile.read(reinterpret_cast<char*>(&cols), sizeof(int));
+
+    // Read the control points
+    std::vector<std::vector<std::vector<BezierControlPoints>>> bezierControlPoints(numSegments, std::vector<std::vector<BezierControlPoints>>(rows, std::vector<BezierControlPoints>(cols)));
+
+    for (auto& segment : bezierControlPoints) {
+        for (auto& row : segment) {
+            for (auto& point : row) {
+                inFile.read(reinterpret_cast<char*>(&point.startPoint), sizeof(cv::Vec3f));
+                inFile.read(reinterpret_cast<char*>(&point.middlePoint), sizeof(cv::Vec3f));
+                inFile.read(reinterpret_cast<char*>(&point.endPoint), sizeof(cv::Vec3f));
             }
         }
     }
 
-    for (int r = 0; r < rows; r++) {
-        for (int c = 0; c < cols; c++) {
-            control_points[0].at<cv::Point>(r, c).x /= count;
-            control_points[0].at<cv::Point>(r, c).y /= count;
-            control_points[1].at<cv::Point>(r, c).x /= count;
-            control_points[1].at<cv::Point>(r, c).y /= count;
-            control_points[2].at<cv::Point>(r, c).x /= count;
-            control_points[2].at<cv::Point>(r, c).y /= count;
-        }
-    }
-
-    return control_points;
-}
-std::vector<std::vector<cv::Mat>> processSegments(const std::vector<cv::Mat>& frames, const std::vector<std::pair<int, int>>& segments) {
-    int num_segments = segments.size();
-    std::vector<std::vector<cv::Mat>> control_points(num_segments);
-
-    #pragma omp parallel for
-    for (int i = 0; i < num_segments; i++) {
-        control_points[i] = leastSquaresControlPoints(frames, segments[i].first, segments[i].second);
-
-        #pragma omp critical
-        {
-            int thread_num = omp_get_thread_num();
-            int num_threads = omp_get_num_threads();
-            int num_procs = omp_get_num_procs();
-            std::cout << "Thread " << thread_num << " of " << num_threads << " (Total CPUs: " << num_procs << ") ";
-            std::cout << "Processing segment " << i + 1 << " of " << num_segments << std::endl;
-        }
-    }
-
-    return control_points;
-}
-
-std::vector<int> generateBreakpoints(int num_segments, int num_frames) {
-    int segment_length = num_frames / num_segments;
-    std::vector<int> breakpoints;
-
-    for (int i = 1; i < num_segments; i++) {
-        breakpoints.push_back(i * segment_length);
-    }
-
-    return breakpoints;
-}
-
-bool writeControlPointsToFile(const std::string& filePath, const std::vector<std::vector<cv::Mat>>& control_points) {
-    std::ofstream outFile(filePath, std::ios::binary | std::ios::out);
-
-    if (!outFile.is_open()) {
-        std::cerr << "Error: Could not open the output file." << std::endl;
-        return false;
-    }
-
-    int num_segments = control_points.size();
-    outFile.write(reinterpret_cast<const char*>(&num_segments), sizeof(num_segments));
-
-    for (const auto& segment_control_points : control_points) {
-        int num_points = segment_control_points.size();
-        outFile.write(reinterpret_cast<const char*>(&num_points), sizeof(num_points));
-        for (const auto& point_mat : segment_control_points) {
-            outFile.write(reinterpret_cast<const char*>(point_mat.data), point_mat.total() * point_mat.elemSize());
-        }
-    }
-
-    outFile.close();
-    return true;
-}
-
-std::vector<std::vector<cv::Mat>> readControlPointsFromFile(const std::string& filePath, cv::Size frame_size) {
-    std::vector<std::vector<cv::Mat>> control_points;
-    std::ifstream inFile(filePath, std::ios::binary | std::ios::in);
-
-    if (!inFile.is_open()) {
-        std::cerr << "Error: Could not open the input file." << std::endl;
-        return control_points;
-    }
-
-    int num_segments;
-    inFile.read(reinterpret_cast<char*>(&num_segments), sizeof(num_segments));
-    control_points.resize(num_segments);
-
-    for (int i = 0; i < num_segments; i++) {
-        int num_points;
-        inFile.read(reinterpret_cast<char*>(&num_points), sizeof(num_points));
-        control_points[i].resize(num_points);
-        for (auto& point_mat : control_points[i]) {
-            point_mat.create(frame_size, CV_32SC2);
-            inFile.read(reinterpret_cast<char*>(point_mat.data), point_mat.total() * point_mat.elemSize());
-        }
-    }
-
     inFile.close();
-    return control_points;
+    std::cout << "Control points loaded from: " << videoName << std::endl;
+
+    return bezierControlPoints;
 }
 
-cv::Mat interpolateFrame(const cv::Mat& ecp1, const cv::Mat& ecp2, const cv::Mat& mcp, double t) {
-    cv::Mat frame1, frame2, frame;
+void createInterpolatedVideo(const std::string& videoPath, const std::vector<std::vector<std::vector<BezierControlPoints>>>& bezierControlPoints, int numFrames) {
+    std::string outputVideoPath = videoPath.substr(0, videoPath.find_last_of('.')) + "_interpolated.mp4";
 
-    // Create a temporary matrix for each frame in the Bezier curve
-    cv::addWeighted(ecp1, 1 - t, mcp, t, 0, frame1);
-    cv::addWeighted(mcp, 1 - t, ecp2, t, 0, frame2);
+    int numSegments = bezierControlPoints.size();
+    int rows = bezierControlPoints[0].size();
+    int cols = bezierControlPoints[0][0].size();
+    int segmentSize = numFrames / numSegments;
 
-    // Interpolate the final frame from the temporary matrices
-    cv::addWeighted(frame1, 1 - t, frame2, t, 0, frame);
+    cv::VideoWriter videoWriter(outputVideoPath, cv::VideoWriter::fourcc('m', 'p', '4', 'v'), video_fps, cv::Size(cols, rows));
 
-    return frame;
-}
+    if (!videoWriter.isOpened()) {
+        std::cerr << "Error: Could not open the output video file for writing." << std::endl;
+        return;
+    }
 
+    int totalFrames = numSegments * segmentSize;
 
-void createVideoFromControlPoints(const std::vector<std::vector<cv::Mat>>& control_points, cv::Size frame_size, const std::string& output_file) {
-    cv::VideoWriter output_video(output_file, cv::VideoWriter::fourcc('m', 'p', '4', 'v'), video_fps, frame_size, true);
+    std::vector<cv::Mat> interpolatedFrames(totalFrames);
 
-    for (std::size_t i = 0; i < control_points.size() - 1; i++) {
-        for (int t = 0; t < video_fps; t++) {
-            double tt = static_cast<double>(t) / video_fps;
-            cv::Mat ecp1 = control_points[i][0];
-            cv::Mat mcp = control_points[i][1];
-            cv::Mat ecp2 = control_points[i + 1][0];
-            cv::Mat frame = interpolateFrame(ecp1, mcp, ecp2, tt);
-            output_video.write(frame);
+    for (size_t segmentIdx = 0; segmentIdx < numSegments; ++segmentIdx) {
+        for (size_t frameIdx = 0; frameIdx < segmentSize; ++frameIdx) {
+            float t = static_cast<float>(frameIdx) / (segmentSize - 1);
+            int currentFrame = segmentIdx * segmentSize + frameIdx;
+            cv::Mat frame(rows, cols, CV_8UC3);
+
+            #pragma omp parallel for
+            for (int i = 0; i < rows; ++i) {
+                for (int j = 0; j < cols; ++j) {
+                    const BezierControlPoints& points = bezierControlPoints[segmentIdx][i][j];
+                    cv::Vec3f interpolatedPixel = (1 - t) * (1 - t) * points.startPoint + 2 * t * (1 - t) * points.middlePoint + t * t * points.endPoint;
+
+                    // Clamp the values to [0, 255] and convert to 8-bit unsigned integer
+                    frame.at<cv::Vec3b>(i, j) = cv::Vec3b(
+                        static_cast<uchar>(std::clamp(interpolatedPixel[0], 0.f, 255.f)),
+                        static_cast<uchar>(std::clamp(interpolatedPixel[1], 0.f, 255.f)),
+                        static_cast<uchar>(std::clamp(interpolatedPixel[2], 0.f, 255.f))
+                    );
+                }
+            }
+
+            // Convert from RGB to BGR (default in OpenCV)
+            cv::cvtColor(frame, frame, cv::COLOR_RGB2BGR);
+            interpolatedFrames[currentFrame] = frame;
+
+            // Calculate and print progress
+            int progress = static_cast<int>(static_cast<float>(currentFrame) / (totalFrames - 1) * 100);
+            std::cout << "\rProgress: " << progress << "%";
+            std::cout.flush();
         }
     }
 
-    output_video.release();
+    // Write frames to the output video file
+    for (const cv::Mat& frame : interpolatedFrames) {
+        videoWriter.write(frame);
+    }
+
+    videoWriter.release();
+    std::cout << std::endl << "Interpolated video saved to: " << outputVideoPath << std::endl;
+}
+
+std::size_t getFileSize(const std::string& filePath) {
+    std::ifstream file(filePath, std::ifstream::ate | std::ifstream::binary);
+
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open the file: " << filePath << std::endl;
+        return 0;
+    }
+
+    std::size_t fileSize = file.tellg(); // Get the current file position (in bytes)
+    file.close();
+
+    return fileSize;
 }
 
 int main() {
     std::string videoPath = "./coverr-decorating-a-snowman-5925-1080p.mp4";
-    std::vector<cv::Mat> frames = extractColorValues(videoPath);
+    std::vector<cv::Mat> frames = readVideoData(videoPath);
+    std::cout << "Uncompressed video size: " << calculateUncompressedVideoSizeInBytes(frames) << " bytes" << std::endl;
 
-    // Take the number of segments as input
-    int num_segments = 8;
+    auto segments = splitFramesIntoSegments(frames, 8);
 
-    // Generate the breakpoints
-    std::vector<int> breakpoints = generateBreakpoints(num_segments, frames.size());
+    std::vector<std::vector<std::vector<BezierControlPoints>>> bezierControlPoints = calculateControlPointsForAllSegments(segments);
 
-    // Divide the data into segments
-    std::vector<std::pair<int, int>> segments = divideIntoSegments(frames, breakpoints);
+    writeControlPointsToFile(videoPath, bezierControlPoints);
 
-    // Process the segments using parallel processing
-    std::vector<std::vector<cv::Mat>> control_points = processSegments(frames, segments);
+    std::vector<std::vector<std::vector<BezierControlPoints>>> readBezierControlPoints = readControlPointsFromFile(videoPath);
 
-    // Save the control points to a binary file
-    std::string control_points_file_path = "./control_points.bin";
-    if (writeControlPointsToFile(control_points_file_path, control_points)) {
-        std::cout << "Control points saved to: " << control_points_file_path << std::endl;
-    } else {
-        std::cerr << "Error: Failed to save control points." << std::endl;
+    // test to see if the read control points are the same as the original control points
+    for (size_t i = 0; i < bezierControlPoints.size(); ++i) {
+        for (size_t j = 0; j < bezierControlPoints[i].size(); ++j) {
+            for (size_t k = 0; k < bezierControlPoints[i][j].size(); ++k) {
+                if (bezierControlPoints[i][j][k].startPoint != readBezierControlPoints[i][j][k].startPoint) {
+                    std::cout << "Error: Start points do not match." << std::endl;
+                    return 1;
+                }
+                if (bezierControlPoints[i][j][k].middlePoint != readBezierControlPoints[i][j][k].middlePoint) {
+                    std::cout << "Error: Middle points do not match." << std::endl;
+                    return 1;
+                }
+                if (bezierControlPoints[i][j][k].endPoint != readBezierControlPoints[i][j][k].endPoint) {
+                    std::cout << "Error: End points do not match." << std::endl;
+                    return 1;
+                }
+            }
+        }
     }
 
-    cv::Size frame_size(frames[0].cols, frames[0].rows);
-
-    // Read control points from the binary file
-    std::vector<std::vector<cv::Mat>> loaded_control_points = readControlPointsFromFile(control_points_file_path, frame_size);
-
-    
-
-    if (loaded_control_points.empty()) {
-        std::cerr << "Error: Failed to load control points." << std::endl;
-    } else {
-        std::cout << "Control points loaded from: " << control_points_file_path << std::endl;
-    }
-
-    // Create a new video using the loaded control points
-    std::string decoded_video_path = "./decoded_video.mp4";
-
-    createVideoFromControlPoints(loaded_control_points, frame_size, decoded_video_path);
+    createInterpolatedVideo(videoPath, bezierControlPoints, frames.size());
 
     return 0;
 }

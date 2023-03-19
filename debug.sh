@@ -1,3 +1,3 @@
-make clean
 make
 ./qbc_compress
+make clean

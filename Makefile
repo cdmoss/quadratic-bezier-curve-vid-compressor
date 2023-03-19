@@ -1,13 +1,19 @@
-CC = g++
-CFLAGS = -Wall -Werror -O3 -fopenmp
-LIBS = `pkg-config --libs opencv4` -fopenmp
-INCLUDES = `pkg-config --cflags opencv4`
-
+# Variables
+CXX = g++
+CXXFLAGS = -Wall -std=c++17 -fopenmp
+OPENCV_INCLUDE = `pkg-config --cflags opencv4`
+OPENCV_LIBS = `pkg-config --libs opencv4`
+EIGEN_INCLUDE = /usr/include/eigen3/
 TARGET = qbc_compress
-SRC = qbc_compress.cpp
 
-$(TARGET): $(SRC)
-	$(CC) $(CFLAGS) $(INCLUDES) -o $(TARGET) $(SRC) $(LIBS)
+# Targets
+all: $(TARGET)
+
+$(TARGET): $(TARGET).o
+	$(CXX) $(CXXFLAGS) -o $(TARGET) $(TARGET).o $(OPENCV_LIBS)
+
+$(TARGET).o: $(TARGET).cpp
+	$(CXX) $(CXXFLAGS) -I$(EIGEN_INCLUDE) $(OPENCV_INCLUDE) -c $(TARGET).cpp
 
 clean:
-	rm -f $(TARGET)
+	rm -f *.o my_program
