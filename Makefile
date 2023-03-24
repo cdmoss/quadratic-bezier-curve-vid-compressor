@@ -16,4 +16,4 @@ $(TARGET).o: $(TARGET).cpp
 	$(CXX) $(CXXFLAGS) -I$(EIGEN_INCLUDE) $(OPENCV_INCLUDE) -c $(TARGET).cpp
 
 clean:
-	rm -f *.o my_program
+	rm -f *.o $(TARGET)

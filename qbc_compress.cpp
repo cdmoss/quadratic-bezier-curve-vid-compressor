@@ -1,3 +1,4 @@
+#include <iostream>
 #include <vector>
 #include <opencv2/opencv.hpp>
 #include <omp.h>
@@ -108,7 +109,7 @@ std::vector<std::vector<BezierControlPoints>> calculateBezierControlPoints(const
                 float t = static_cast<float>(frameIdx) / (segmentSize - 1);
                 cv::Vec3f v = segment[frameIdx].at<cv::Vec3b>(i, j);
 
-                numerator += (v - (1 - t) * (1 - t) * startPoint - t * t * endPoint) * 2 * t * (1 - t);
+                numerator += (v - (1 - t) * (1 - t) * startPoint - t * t * endPoint);
                 denominator += 2 * t * (1 - t);
             }
 
@@ -176,6 +177,7 @@ void writeControlPointsToFile(const std::string& videoPath, const std::vector<st
     outFile.write(reinterpret_cast<const char*>(&cols), sizeof(int));
 
     // Write the control points
+
     for (const auto& segment : bezierControlPoints) {
         for (const auto& row : segment) {
             for (const auto& point : row) {
@@ -184,7 +186,9 @@ void writeControlPointsToFile(const std::string& videoPath, const std::vector<st
                 outFile.write(reinterpret_cast<const char*>(&point.endPoint), sizeof(cv::Vec3f));
             }
         }
+
     }
+
     std::cout << "Control points saved to: " << videoName << std::endl;
     std::cout << "Number of bytes written: " << outFile.tellp() << std::endl;
     outFile.close();
@@ -232,6 +236,8 @@ void createInterpolatedVideo(const std::string& videoPath, const std::vector<std
     int rows = bezierControlPoints[0].size();
     int cols = bezierControlPoints[0][0].size();
     int segmentSize = numFrames / numSegments;
+
+    std::cout << "segmentSize: " << segmentSize << std::endl;
 
     cv::VideoWriter videoWriter(outputVideoPath, cv::VideoWriter::fourcc('m', 'p', '4', 'v'), video_fps, cv::Size(cols, rows));
 
@@ -300,11 +306,12 @@ std::size_t getFileSize(const std::string& filePath) {
 }
 
 int main() {
-    std::string videoPath = "./coverr-decorating-a-snowman-5925-1080p.mp4";
+    std::string videoPath = "coverr--07-022-22-gardening_0034-3713-1080p.mp4";
     std::vector<cv::Mat> frames = readVideoData(videoPath);
+
     std::cout << "Uncompressed video size: " << calculateUncompressedVideoSizeInBytes(frames) << " bytes" << std::endl;
 
-    auto segments = splitFramesIntoSegments(frames, 8);
+    auto segments = splitFramesIntoSegments(frames, 10);
 
     std::vector<std::vector<std::vector<BezierControlPoints>>> bezierControlPoints = calculateControlPointsForAllSegments(segments);
 
@@ -312,6 +319,7 @@ int main() {
 
     std::vector<std::vector<std::vector<BezierControlPoints>>> readBezierControlPoints = readControlPointsFromFile(videoPath);
 
+    
     // test to see if the read control points are the same as the original control points
     for (size_t i = 0; i < bezierControlPoints.size(); ++i) {
         for (size_t j = 0; j < bezierControlPoints[i].size(); ++j) {
