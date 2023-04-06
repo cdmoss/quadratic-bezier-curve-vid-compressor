@@ -306,7 +306,7 @@ std::size_t getFileSize(const std::string& filePath) {
 }
 
 int main() {
-    std::string videoPath = "coverr--07-022-22-gardening_0034-3713-1080p.mp4";
+    std::string videoPath = "coverr-decorating-a-snowman-5925-1080p.mp4";
     std::vector<cv::Mat> frames = readVideoData(videoPath);
 
     std::cout << "Uncompressed video size: " << calculateUncompressedVideoSizeInBytes(frames) << " bytes" << std::endl;
